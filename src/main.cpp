@@ -14,6 +14,7 @@
 #include "DevRelay.h"
 #include "DevSwitch.h"
 #include "DevDS18B20.h"
+#include "DevXYMDSensor.h"
 #include "DashboardPage.h"
 
 // Pin assignment ตาม blueprint.md
@@ -33,6 +34,11 @@ DevSwitch sw3(PIN_SW3);
 
 constexpr uint8_t PIN_DS18B20 = 14;  // DATA + pull-up 4.7k ไป 3V3
 DevDS18B20 ds18b20(PIN_DS18B20);
+
+// XY-MD03 (Modbus RTU, ID 2) ผ่าน Serial0 (UART0: GPIO1 TX / GPIO3 RX) ผ่านวงจรสลับ RS232/RS485
+// ห้ามใช้ Serial.print ใน firmware นี้ เพราะ Serial0 คือบัส Modbus
+constexpr uint8_t XYMD_SLAVE_ID = 2;
+DevXYMDSensor xymd(&Serial, XYMD_SLAVE_ID);
 
 // OLED SSD1306 128x64 (I2C: SDA=GPIO21, SCL=GPIO22)
 constexpr uint8_t SCREEN_WIDTH = 128;
@@ -82,7 +88,6 @@ bool checkWifiResetHold() {
       char buf[24];
       snprintf(buf, sizeof(buf), "Reset in %d s", remain);
       showMessage("RESET WIFI", buf, "Release to cancel");
-      Serial.println(buf);
     }
     delay(20);
   }
@@ -100,7 +105,6 @@ void setupWifi() {
   if (checkWifiResetHold()) {
     wm.resetSettings();
     showMessage("WiFi reset done", "Restarting setup...");
-    Serial.println("WiFi settings cleared");
     delay(1500);
   }
   wm.setAPCallback(onConfigPortal);
@@ -110,8 +114,6 @@ void setupWifi() {
     delay(2000);
     ESP.restart();
   }
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
 }
 
 void drawRelayRow(uint8_t row, const char* name, const DevRelay& r) {
@@ -169,7 +171,7 @@ bool httpGetJson(const String& url, JsonDocument& doc) {
   if (code == HTTP_CODE_OK) {
     ok = !deserializeJson(doc, http.getStream());
   } else {
-    Serial.printf("HTTP error %d for %s\n", code, url.c_str());
+    (void)code;
   }
   http.end();
   return ok;
@@ -203,7 +205,6 @@ bool fetchWeather() {
 
   w.valid = true;
   weather = w;
-  Serial.printf("%s: T=%.1fC H=%d%% PM2.5=%.1f AQI=%d Rain=%d%%\n", WEATHER_CITY, w.temp, w.hum, w.pm25, w.aqi, w.rainPop);
   return true;
 }
 
@@ -298,13 +299,44 @@ void drawTempPage() {
   }
 }
 
+// หน้า XY-MD03: Temp / Hum ตัวใหญ่
+void drawXymdPage() {
+  display.setCursor(0, 0);
+  display.printf("XY-MD03 ID%u", xymd.getSlaveID());
+  const char* tag = xymd.isSimulated() ? "SIM" : "LIVE";
+  int16_t tw = strlen(tag) * 6 + 4;
+  if (xymd.isSimulated()) {
+    display.fillRoundRect(SCREEN_WIDTH - tw, 0, tw, 10, 2, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+  } else {
+    display.drawRoundRect(SCREEN_WIDTH - tw, 0, tw, 10, 2, SSD1306_WHITE);
+  }
+  display.setCursor(SCREEN_WIDTH - tw + 2, 1);
+  display.print(tag);
+  display.setTextColor(SSD1306_WHITE);
+  display.drawLine(0, 11, SCREEN_WIDTH - 1, 11, SSD1306_WHITE);
+
+  if (!xymd.hasReading()) {
+    display.setCursor(0, 28);
+    display.print("Reading...");
+    return;
+  }
+  display.setTextSize(2);
+  display.setCursor(0, 18);
+  display.printf("T %.1f C", xymd.getTemperature());
+  display.setCursor(0, 42);
+  display.printf("H %.1f %%", xymd.getHumidity());
+  display.setTextSize(1);
+}
+
 void updateOled() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  switch ((millis() / PAGE_INTERVAL_MS) % 3) {
+  switch ((millis() / PAGE_INTERVAL_MS) % 4) {
     case 0: drawTempPage(); break;
-    case 1: drawRelayPage(); break;
+    case 1: drawXymdPage(); break;
+    case 2: drawRelayPage(); break;
     default: drawWeatherPage(); break;
   }
   display.display();
@@ -345,6 +377,13 @@ void handleStatus() {
   t["max"] = ds18b20.getMax();
   JsonArray hist = t["history"].to<JsonArray>();
   for (uint8_t i = 0; i < ds18b20.getHistoryCount(); i++) hist.add(serialized(String(ds18b20.getHistory(i), 1)));
+
+  JsonObject x = doc["xymd"].to<JsonObject>();
+  x["has"] = xymd.hasReading();
+  x["sim"] = xymd.isSimulated();
+  x["id"] = xymd.getSlaveID();
+  x["temp"] = xymd.getTemperature();
+  x["hum"] = xymd.getHumidity();
 
   JsonObject w = doc["weather"].to<JsonObject>();
   w["city"] = WEATHER_CITY;
@@ -395,7 +434,6 @@ void setupWebServer() {
   server.on("/api/relay", handleRelay);
   server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
   server.begin();
-  Serial.printf("Dashboard: http://%s  (http://%s.local)\n", WiFi.localIP().toString().c_str(), MDNS_NAME);
 }
 
 // กดสวิตช์ 1 ครั้ง = สลับ ON <-> OFF ของ relay ที่คู่กัน
@@ -403,7 +441,7 @@ void onSw2Press() { relay2.toggle(); }
 void onSw3Press() { relay3.toggle(); }
 
 void setup() {
-  Serial.begin(9600);
+  xymd.begin(9600);  // Serial0 เท่านั้น
 
   relay1.begin();
   relay2.begin();
@@ -418,7 +456,6 @@ void setup() {
 
   Wire.begin(21, 22);
   oledReady = display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
-  if (!oledReady) Serial.println("OLED init failed");
 
   setupWifi();
   setupWebServer();
@@ -472,6 +509,7 @@ void loop() {
   sw2.update();
   sw3.update();
   ds18b20.update();
+  xymd.update();
 
   if (millis() - lastWeather >= WEATHER_INTERVAL_MS) {
     lastWeather = millis();

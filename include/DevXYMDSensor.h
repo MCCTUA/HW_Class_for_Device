@@ -30,6 +30,28 @@ private:
   float humidity;                // ค่าความชื้นล่าสุด (%)
   bool lastReadSuccess;          // สถานะการอ่านค่าครั้งล่าสุด
   unsigned long lastReadTime;    // เวลาที่อ่านค่าครั้งล่าสุด
+
+  // Simulation fallback: ไม่ต่อ sensor / อ่านผิดพลาดติดกัน FAIL_LIMIT ครั้ง -> ใช้ค่าจำลอง
+  // และยังลองอ่านของจริงต่อ (ช้าลงเป็น SIM_RETRY_MS) ถ้า sensor กลับมาจะสลับเป็นค่าจริงเอง
+  static const uint8_t FAIL_LIMIT = 3;
+  static const unsigned long SIM_RETRY_MS = 15000;  // read timeout ของ Modbus ~2 s จึงลองถี่ไม่ได้
+  unsigned long intervalMs = 2000;
+  unsigned long lastPoll = 0;
+  uint8_t failCount = 0;
+  bool simulated = true;
+  bool hasValue = false;
+  float simTemp = 27.0;
+  float simHum = 60.0;
+
+  // ค่าจำลอง: sine ช้า ๆ + random walk เล็กน้อย (ความชื้นสวนทางกับอุณหภูมิ)
+  void nextSimulated() {
+    float phase = sin(millis() / 60000.0 * TWO_PI);
+    simTemp += ((28.0 + 3.0 * phase) - simTemp) * 0.3 + ((int)random(-10, 11)) / 100.0;
+    simHum += ((60.0 - 8.0 * phase) - simHum) * 0.3 + ((int)random(-20, 21)) / 100.0;
+    temperature = simTemp;
+    humidity = simHum;
+    hasValue = true;
+  }
   
   // Modbus Register Addresses
   static const uint16_t REG_TEMPERATURE = 0x0001;
@@ -61,40 +83,58 @@ public:
     
     // เริ่มต้น Modbus
     modbus.begin(slaveID, *serial);
-    
-    Serial.printf("[DevXYMDSensor] Initialized: SlaveID=%d, Baud=%lu (Auto Direction)\n", slaveID, baudRate);
+    lastPoll = millis() - intervalMs;  // อ่านรอบแรกทันที
   }
 
   /**
-   * @brief อ่านค่าอุณหภูมิและความชื้นจากเซนเซอร์
-   * @return true ถ้าอ่านสำเร็จ, false ถ้าอ่านไม่สำเร็จ
+   * @brief เรียกใน loop() - อ่านค่าตามรอบเวลา, สลับเป็นค่าจำลองอัตโนมัติถ้าอ่านไม่ได้
+   * @note ห้ามพิมพ์ลง Serial0 ระหว่างใช้งาน เพราะ Serial0 คือบัส RS485
+   * @return true ถ้ามีค่าใหม่ในรอบนี้ (จริงหรือจำลอง)
    */
   bool update() {
-    uint8_t result;
-    uint16_t data[2];
-    
-    // อ่านค่า 2 Registers (Temperature & Humidity) โดยใช้ Function Code 04
-    result = modbus.readInputRegisters(REG_TEMPERATURE, 2);
-    
+    unsigned long wait = simulated ? SIM_RETRY_MS : intervalMs;
+    if (millis() - lastPoll < wait) {
+      // ช่วงรอลองของจริงใหม่: ยังคงอัปเดตค่าจำลองตาม intervalMs
+      if (simulated && millis() - lastReadTime >= intervalMs) {
+        lastReadTime = millis();
+        nextSimulated();
+        return true;
+      }
+      return false;
+    }
+    lastPoll = millis();
+
+    uint8_t result = modbus.readInputRegisters(REG_TEMPERATURE, 2);  // FC 04: Temp, Hum
     if (result == modbus.ku8MBSuccess) {
-      // อ่านค่าสำเร็จ
-      data[0] = modbus.getResponseBuffer(0);  // Temperature
-      data[1] = modbus.getResponseBuffer(1);  // Humidity
-      
-      // แปลงค่า (หารด้วย 10)
-      temperature = data[0] / 10.0;
-      humidity = data[1] / 10.0;
-      
+      if (simulated) {
+        simulated = false;
+        hasValue = false;
+      }
+      failCount = 0;
+      temperature = modbus.getResponseBuffer(0) / 10.0;
+      humidity = modbus.getResponseBuffer(1) / 10.0;
+      hasValue = true;
       lastReadSuccess = true;
       lastReadTime = millis();
       return true;
-    } else {
-      // อ่านค่าไม่สำเร็จ
-      lastReadSuccess = false;
-      Serial.printf("[DevXYMDSensor] Read failed! Error code: 0x%02X\n", result);
-      return false;
     }
+
+    lastReadSuccess = false;
+    if (failCount < 255) failCount++;
+    if (failCount >= FAIL_LIMIT) {
+      simulated = true;
+      lastReadTime = millis();
+      nextSimulated();
+      return true;
+    }
+    return false;
   }
+
+  /** true = ค่าที่ได้เป็นค่าจำลอง (ไม่พบ sensor) */
+  bool isSimulated() const { return simulated; }
+
+  /** true = มีค่าให้แสดงแล้ว (ค่าจริงหรือจำลอง) */
+  bool hasReading() const { return hasValue; }
 
   /**
    * @brief ดึงค่าอุณหภูมิล่าสุด
@@ -129,7 +169,7 @@ public:
   }
 
   /**
-   * @brief แสดงข้อมูลทั้งหมดทาง Serial
+   * @brief แสดงข้อมูลทั้งหมดทาง Serial (ใช้ได้เฉพาะตอนไม่ได้ใช้ Serial0 เป็นบัส RS485)
    */
   void printInfo() const {
     Serial.println("=== XY-MD03 Temperature & Humidity Sensor ===");
@@ -148,7 +188,6 @@ public:
   void setSlaveID(uint8_t newSlaveId) {
     slaveID = newSlaveId;
     modbus.begin(slaveID, *serial);
-    Serial.printf("[DevXYMDSensor] Slave ID changed to: %d\n", slaveID);
   }
 
   /**

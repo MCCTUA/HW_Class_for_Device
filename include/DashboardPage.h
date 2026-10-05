@@ -45,6 +45,7 @@ button:disabled{opacity:.5;cursor:wait}
 <header><h1>ESP32 Dashboard</h1><span id="conn">connecting…</span></header>
 <main>
 <section><h2>Temperature — DS18B20<span id="tbadge" class="badge"></span></h2><div id="temp"></div></section>
+<section><h2>Temp &amp; Humidity — XY-MD03<span id="xbadge" class="badge"></span></h2><div id="xymd"></div></section>
 <section><h2>Relay</h2><div id="relays"></div></section>
 <section><h2>Weather — <span id="city">-</span></h2><div id="weather"></div></section>
 <section><h2>WiFi</h2><div id="wifi"></div></section>
@@ -75,6 +76,11 @@ function render(s){
     rows([['Min',t.min.toFixed(1)+' °C'],['Max',t.max.toFixed(1)+' °C'],['Source',t.sim?'Simulated (no sensor)':'DS18B20 on GPIO14']])+
     '<canvas id="spark"></canvas>':rows([['Status','Reading…']]);
   if(t.has)spark(t.history);
+  const x=s.xymd;
+  $('xbadge').textContent=x.sim?'SIMULATION':'LIVE';$('xbadge').className='badge'+(x.sim?' sim':'');
+  $('xymd').innerHTML=x.has?`<div class="big">${x.temp.toFixed(1)}<small> °C</small></div>`+
+    `<div class="big" style="margin-top:8px">${x.hum.toFixed(1)}<small> %RH</small></div>`+
+    rows([['Source',x.sim?'Simulated (no sensor)':'XY-MD03 (RS485, ID '+x.id+')']]):rows([['Status','Reading…']]);
   $('relays').innerHTML=s.relays.map(r=>`<div class="relay ${r.on?'on':''}">
     <span><i class="dot"></i>Relay ${r.id}</span>
     <button data-id="${r.id}">${r.on?'ON':'OFF'}</button></div>`).join('');

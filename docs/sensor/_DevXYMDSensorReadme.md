@@ -519,9 +519,9 @@ void loop() {
 |-----------|-------------|----------|
 | 0xE0 | Invalid Slave ID | ตรวจสอบ Slave ID |
 | 0xE1 | Invalid Function | ใช้ Function Code 04 |
-| 0xE2 | Invalid Data Address | ตรวจสอบ Register Address |
-| 0xE3 | Invalid Data Value | ตรวจสอบค่าที่ส่ง |
-| 0xE4 | Slave Device Failure | รีสตาร์ทเซนเซอร์ |
+| 0xE2 | Response Timed Out | ไม่มีตอบกลับ: ตรวจสาย A/B, ไฟ, baud, Slave ID |
+| 0xE3 | Invalid CRC | ข้อมูลเสียหาย: ตรวจ terminator, GND, สาย |
+| 0x01-0x04 | Exception จาก slave | ดู [_ModbusGuide.md](_ModbusGuide.md) |
 
 ---
 
