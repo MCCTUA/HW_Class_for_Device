@@ -27,6 +27,11 @@ h2{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;le
 .row:last-child{border-bottom:0}
 .row span:first-child{color:var(--muted)}
 .row span:last-child{font-variant-numeric:tabular-nums;text-align:right;word-break:break-all}
+.big{font-size:44px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums}
+.big small{font-size:20px;color:var(--muted);font-weight:400}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;vertical-align:middle;margin-left:8px;border:1px solid var(--on);color:var(--on)}
+.badge.sim{border-color:#d97706;color:#d97706}
+#spark{width:100%;height:70px;display:block;margin-top:8px}
 .relay{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}
 .relay:last-child{border-bottom:0}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--off);margin-right:8px}
@@ -39,6 +44,7 @@ button:disabled{opacity:.5;cursor:wait}
 <body>
 <header><h1>ESP32 Dashboard</h1><span id="conn">connecting…</span></header>
 <main>
+<section><h2>Temperature — DS18B20<span id="tbadge" class="badge"></span></h2><div id="temp"></div></section>
 <section><h2>Relay</h2><div id="relays"></div></section>
 <section><h2>Weather — <span id="city">-</span></h2><div id="weather"></div></section>
 <section><h2>WiFi</h2><div id="wifi"></div></section>
@@ -50,7 +56,25 @@ const aqiText=['-','Good','Fair','Moderate','Poor','Very Poor'];
 const fmtUp=s=>{const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return(d?d+'d ':'')+h+'h '+m+'m'};
 const sig=r=>r>=-60?'Excellent':r>=-70?'Good':r>=-80?'Fair':'Weak';
 
+function spark(h){
+  const c=$('spark');if(!c)return;
+  const dpr=window.devicePixelRatio||1,W=c.clientWidth,H=c.clientHeight;
+  c.width=W*dpr;c.height=H*dpr;
+  const x=c.getContext('2d');x.scale(dpr,dpr);
+  if(h.length<2)return;
+  const lo=Math.min(...h),hi=Math.max(...h),sp=Math.max(hi-lo,1);
+  const col=getComputedStyle(document.body).getPropertyValue('--accent');
+  x.strokeStyle=col;x.lineWidth=2;x.lineJoin='round';x.beginPath();
+  h.forEach((v,i)=>{const px=i/(h.length-1)*W,py=H-4-(v-lo)/sp*(H-8);i?x.lineTo(px,py):x.moveTo(px,py)});
+  x.stroke();
+}
 function render(s){
+  const t=s.temp;
+  $('tbadge').textContent=t.sim?'SIMULATION':'LIVE';$('tbadge').className='badge'+(t.sim?' sim':'');
+  $('temp').innerHTML=t.has?`<div class="big">${t.value.toFixed(1)}<small> °C</small></div>`+
+    rows([['Min',t.min.toFixed(1)+' °C'],['Max',t.max.toFixed(1)+' °C'],['Source',t.sim?'Simulated (no sensor)':'DS18B20 on GPIO14']])+
+    '<canvas id="spark"></canvas>':rows([['Status','Reading…']]);
+  if(t.has)spark(t.history);
   $('relays').innerHTML=s.relays.map(r=>`<div class="relay ${r.on?'on':''}">
     <span><i class="dot"></i>Relay ${r.id}</span>
     <button data-id="${r.id}">${r.on?'ON':'OFF'}</button></div>`).join('');

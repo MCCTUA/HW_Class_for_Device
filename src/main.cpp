@@ -13,6 +13,7 @@
 
 #include "DevRelay.h"
 #include "DevSwitch.h"
+#include "DevDS18B20.h"
 #include "DashboardPage.h"
 
 // Pin assignment ตาม blueprint.md
@@ -29,6 +30,9 @@ DevRelay relay3(PIN_RELAY3);
 DevSwitch sw1(PIN_SW1);
 DevSwitch sw2(PIN_SW2);
 DevSwitch sw3(PIN_SW3);
+
+constexpr uint8_t PIN_DS18B20 = 14;  // DATA + pull-up 4.7k ไป 3V3
+DevDS18B20 ds18b20(PIN_DS18B20);
 
 // OLED SSD1306 128x64 (I2C: SDA=GPIO21, SCL=GPIO22)
 constexpr uint8_t SCREEN_WIDTH = 128;
@@ -233,14 +237,75 @@ void drawWeatherPage() {
   display.printf("Rain chance %d%%", weather.rainPop);
 }
 
+// หน้าอุณหภูมิ DS18B20: ตัวเลขใหญ่ + min/max + กราฟประวัติ
+void drawTempPage() {
+  display.setCursor(0, 0);
+  display.print("DS18B20");
+  const char* tag = ds18b20.isSimulated() ? "SIM" : "LIVE";
+  int16_t tw = strlen(tag) * 6 + 4;
+  if (ds18b20.isSimulated()) {
+    display.fillRoundRect(SCREEN_WIDTH - tw, 0, tw, 10, 2, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+  } else {
+    display.drawRoundRect(SCREEN_WIDTH - tw, 0, tw, 10, 2, SSD1306_WHITE);
+  }
+  display.setCursor(SCREEN_WIDTH - tw + 2, 1);
+  display.print(tag);
+  display.setTextColor(SSD1306_WHITE);
+
+  if (!ds18b20.hasReading()) {
+    display.setCursor(0, 28);
+    display.print("Reading...");
+    return;
+  }
+  display.setTextSize(3);
+  display.setCursor(0, 14);
+  display.printf("%.1f", ds18b20.getTemp());
+  display.setTextSize(1);
+  display.drawCircle(88, 16, 2, SSD1306_WHITE);  // สัญลักษณ์ ° ตัวเล็ก
+  display.setTextSize(2);
+  display.setCursor(94, 14);
+  display.print("C");
+  display.setTextSize(1);
+  display.setCursor(92, 34);
+  display.printf("%.0f", ds18b20.getMax());
+  display.setCursor(92, 42);
+  display.printf("%.0f", ds18b20.getMin());
+  display.setCursor(104, 34);
+  display.print("max");
+  display.setCursor(104, 42);
+  display.print("min");
+
+  // sparkline (y = 40..63, x = 0..87)
+  uint8_t n = ds18b20.getHistoryCount();
+  display.drawFastHLine(0, 39, 88, SSD1306_WHITE);
+  if (n >= 2) {
+    float lo = ds18b20.getHistory(0), hi = lo;
+    for (uint8_t i = 1; i < n; i++) {
+      float v = ds18b20.getHistory(i);
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    float span = max(hi - lo, 1.0f);
+    int16_t px = 0, py = 0;
+    for (uint8_t i = 0; i < n; i++) {
+      int16_t x = i * 87 / (DevDS18B20::HISTORY_SIZE - 1);
+      int16_t y = 62 - (int16_t)((ds18b20.getHistory(i) - lo) / span * 20);
+      if (i) display.drawLine(px, py, x, y, SSD1306_WHITE);
+      px = x;
+      py = y;
+    }
+  }
+}
+
 void updateOled() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  if ((millis() / PAGE_INTERVAL_MS) % 2 == 0) {
-    drawRelayPage();
-  } else {
-    drawWeatherPage();
+  switch ((millis() / PAGE_INTERVAL_MS) % 3) {
+    case 0: drawTempPage(); break;
+    case 1: drawRelayPage(); break;
+    default: drawWeatherPage(); break;
   }
   display.display();
 }
@@ -271,6 +336,15 @@ void handleStatus() {
     r["id"] = id;
     r["on"] = relayById(id)->getState();
   }
+
+  JsonObject t = doc["temp"].to<JsonObject>();
+  t["has"] = ds18b20.hasReading();
+  t["value"] = ds18b20.getTemp();
+  t["sim"] = ds18b20.isSimulated();
+  t["min"] = ds18b20.getMin();
+  t["max"] = ds18b20.getMax();
+  JsonArray hist = t["history"].to<JsonArray>();
+  for (uint8_t i = 0; i < ds18b20.getHistoryCount(); i++) hist.add(serialized(String(ds18b20.getHistory(i), 1)));
 
   JsonObject w = doc["weather"].to<JsonObject>();
   w["city"] = WEATHER_CITY;
@@ -338,6 +412,7 @@ void setup() {
   sw1.begin();
   sw2.begin();
   sw3.begin();
+  ds18b20.begin();
   sw2.onPress(onSw2Press);
   sw3.onPress(onSw3Press);
 
@@ -396,6 +471,7 @@ void loop() {
   handleSw1();
   sw2.update();
   sw3.update();
+  ds18b20.update();
 
   if (millis() - lastWeather >= WEATHER_INTERVAL_MS) {
     lastWeather = millis();
