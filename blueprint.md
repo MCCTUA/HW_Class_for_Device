@@ -18,6 +18,41 @@
 - Input class (Switch, IsoInput) ใช้ non-blocking `millis()` ไม่ใช้ `delay()` (ต่างจาก PZEM ที่ใช้ `delay` ใน `update()`)
 - Callback เป็น plain function pointer `void (*)()` (ไม่รองรับ lambda ที่ capture)
 
+### Pin assignment: Switch บนบอร์ด
+
+| Switch | GPIO | Logic | Pull-up |
+|--------|------|-------|---------|
+| SW1 | 34 | Active Low | 10 kΩ ภายนอก (บนบอร์ด) |
+| SW2 | 35 | Active Low | 10 kΩ ภายนอก (บนบอร์ด) |
+| SW3 | 32 | Active Low | 10 kΩ ภายนอก (บนบอร์ด) |
+
+- สร้างด้วย `DevSwitch(pin)` ได้เลย (default `activeHigh = false` = Active Low)
+- GPIO34/35 เป็น *input-only* และ **ไม่มี internal pull-up** → `INPUT_PULLUP` ที่ `DevSwitch::begin()` ตั้งให้ไม่มีผลกับสองขานี้ แต่ใช้งานได้เพราะมี pull-up ภายนอก 10 kΩ บนบอร์ดแล้ว
+- [main.cpp](src/main.cpp) ใช้ SW1/SW2/SW3 สลับ Relay1/2/3 ตามลำดับ และย้าย `DevIsoInput` ไปที่ GPIO33 (ISOIN1) เพื่อไม่ให้ชน GPIO34
+
+### Pin assignment: Relay บนบอร์ด
+
+**ชนิด: Active LOW** (สั่ง `LOW` = Relay ON, สั่ง `HIGH` = Relay OFF) ตรงกับ default ของ `DevRelay(pin)` (`activeLow = true`)
+
+| Relay | GPIO |
+|-------|------|
+| relay1 | 17 |
+| relay2 | 16 |
+| relay3 | 4 |
+
+- ⚠️ GPIO16/17 เป็นขา RX/TX default ของ `Serial2` (UART2) ซึ่งตรงกับ relay2/relay1 — ถ้า `DevXYMDSensor` ใช้ `Serial2` ด้วยค่า default จะชนกับ relay ต้องกำหนดขา UART2 เองด้วย `Serial2.begin(baud, SERIAL_8N1, rx, tx)` ที่ไม่ใช่ 16/17
+
+### Pin assignment: OLED SSD1306 (I2C)
+
+| ขา OLED | ต่อกับ |
+|---------|--------|
+| VCC | 3V3 |
+| GND | GND |
+| SDA | GPIO21 |
+| SCL | GPIO22 |
+
+- I2C address มักเป็น `0x3C` (ถ้าจอไม่ขึ้นลอง `0x3D`)
+
 ## 2. แผนภาพคลาส
 
 ```mermaid
