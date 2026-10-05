@@ -8,8 +8,12 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+#include <WebServer.h>
+#include <ESPmDNS.h>
+
 #include "DevRelay.h"
 #include "DevSwitch.h"
+#include "DashboardPage.h"
 
 // Pin assignment ตาม blueprint.md
 constexpr uint8_t PIN_RELAY1 = 17;  // Active Low
@@ -241,6 +245,85 @@ void updateOled() {
   display.display();
 }
 
+// ---------- Web Dashboard ----------
+// เปิดจากเบราว์เซอร์ในวง LAN เดียวกัน: http://<IP ที่แสดงบน OLED> หรือ http://esp32.local
+WebServer server(80);
+constexpr const char* MDNS_NAME = "esp32";
+
+DevRelay* relayById(int id) {
+  switch (id) {
+    case 1: return &relay1;
+    case 2: return &relay2;
+    case 3: return &relay3;
+    default: return nullptr;
+  }
+}
+
+void handleRoot() {
+  server.send_P(200, "text/html; charset=utf-8", DASHBOARD_HTML);
+}
+
+void handleStatus() {
+  JsonDocument doc;
+  JsonArray relays = doc["relays"].to<JsonArray>();
+  for (int id = 1; id <= 3; id++) {
+    JsonObject r = relays.add<JsonObject>();
+    r["id"] = id;
+    r["on"] = relayById(id)->getState();
+  }
+
+  JsonObject w = doc["weather"].to<JsonObject>();
+  w["city"] = WEATHER_CITY;
+  w["valid"] = weather.valid;
+  w["fetched"] = weatherFetched;
+  w["temp"] = weather.temp;
+  w["hum"] = weather.hum;
+  w["pm25"] = weather.pm25;
+  w["aqi"] = weather.aqi;
+  w["rain"] = weather.rainPop;
+  w["age"] = (millis() - lastWeather) / 1000;
+
+  JsonObject f = doc["wifi"].to<JsonObject>();
+  f["ssid"] = WiFi.SSID();
+  f["rssi"] = WiFi.RSSI();
+  f["ip"] = WiFi.localIP().toString();
+  f["gateway"] = WiFi.gatewayIP().toString();
+  f["mac"] = WiFi.macAddress();
+  doc["uptime"] = millis() / 1000;
+
+  String out;
+  serializeJson(doc, out);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", out);
+}
+
+// POST /api/relay?id=1&state=on|off|toggle
+void handleRelay() {
+  if (server.method() != HTTP_POST) {
+    server.send(405, "application/json", "{\"error\":\"use POST\"}");
+    return;
+  }
+  DevRelay* r = relayById(server.arg("id").toInt());
+  String state = server.arg("state");
+  if (!r || (state != "on" && state != "off" && state != "toggle")) {
+    server.send(400, "application/json", "{\"error\":\"bad id or state\"}");
+    return;
+  }
+  if (state == "toggle") r->toggle();
+  else r->setState(state == "on");
+  server.send(200, "application/json", String("{\"on\":") + (r->getState() ? "true" : "false") + "}");
+}
+
+void setupWebServer() {
+  if (MDNS.begin(MDNS_NAME)) MDNS.addService("http", "tcp", 80);
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/status", HTTP_GET, handleStatus);
+  server.on("/api/relay", handleRelay);
+  server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
+  server.begin();
+  Serial.printf("Dashboard: http://%s  (http://%s.local)\n", WiFi.localIP().toString().c_str(), MDNS_NAME);
+}
+
 // กดสวิตช์ 1 ครั้ง = สลับ ON <-> OFF ของ relay ที่คู่กัน
 void onSw2Press() { relay2.toggle(); }
 void onSw3Press() { relay3.toggle(); }
@@ -263,6 +346,7 @@ void setup() {
   if (!oledReady) Serial.println("OLED init failed");
 
   setupWifi();
+  setupWebServer();
 
   showMessage("Loading weather...");
   fetchWeather();
@@ -307,6 +391,7 @@ void handleSw1() {
 }
 
 void loop() {
+  server.handleClient();
   sw1.update();
   handleSw1();
   sw2.update();
