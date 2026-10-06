@@ -10,6 +10,7 @@
 
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <PubSubClient.h>
 
 #include "DevRelay.h"
 #include "DevSwitch.h"
@@ -360,8 +361,11 @@ void handleRoot() {
   server.send_P(200, "text/html; charset=utf-8", DASHBOARD_HTML);
 }
 
-void handleStatus() {
-  JsonDocument doc;
+// MQTT (นิยามด้านล่าง) ใช้ในหน้า dashboard
+void fillMqttStatus(JsonObject m);
+
+// สร้าง JSON สถานะรวมทุกอย่าง ใช้ทั้ง /api/status และ MQTT telemetry
+void fillStatus(JsonDocument& doc, bool forDashboard) {
   JsonArray relays = doc["relays"].to<JsonArray>();
   for (int id = 1; id <= 3; id++) {
     JsonObject r = relays.add<JsonObject>();
@@ -375,8 +379,10 @@ void handleStatus() {
   t["sim"] = ds18b20.isSimulated();
   t["min"] = ds18b20.getMin();
   t["max"] = ds18b20.getMax();
-  JsonArray hist = t["history"].to<JsonArray>();
-  for (uint8_t i = 0; i < ds18b20.getHistoryCount(); i++) hist.add(serialized(String(ds18b20.getHistory(i), 1)));
+  if (forDashboard) {
+    JsonArray hist = t["history"].to<JsonArray>();
+    for (uint8_t i = 0; i < ds18b20.getHistoryCount(); i++) hist.add(serialized(String(ds18b20.getHistory(i), 1)));
+  }
 
   JsonObject x = doc["xymd"].to<JsonObject>();
   x["has"] = xymd.hasReading();
@@ -403,7 +409,12 @@ void handleStatus() {
   f["gateway"] = WiFi.gatewayIP().toString();
   f["mac"] = WiFi.macAddress();
   doc["uptime"] = millis() / 1000;
+  if (forDashboard) fillMqttStatus(doc["mqtt"].to<JsonObject>());
+}
 
+void handleStatus() {
+  JsonDocument doc;
+  fillStatus(doc, true);
   String out;
   serializeJson(doc, out);
   server.sendHeader("Cache-Control", "no-store");
@@ -436,6 +447,173 @@ void setupWebServer() {
   server.begin();
 }
 
+// ---------- MQTT (HiveMQ public broker) ----------
+// Topic ทั้งหมดอยู่ใต้ <base> เช่น hwclass/esp32-a1b2c3
+//   <base>/telemetry          (publish, JSON รวมทุกค่า ทุก 5 วินาที)
+//   <base>/status             (publish, retained: online/offline, มี Last Will)
+//   <base>/relay/<n>/state    (publish, retained: ON/OFF เมื่อเปลี่ยน)
+//   <base>/relay/<n>/set      (subscribe: on|off|toggle|1|0|true|false)
+//   <base>/relay/all/set      (subscribe: คำสั่งเดียวกัน ใช้กับทุก relay)
+#ifndef MQTT_HOST
+#define MQTT_HOST "broker.hivemq.com"
+#endif
+#ifndef MQTT_PORT
+#define MQTT_PORT 1883
+#endif
+constexpr unsigned long MQTT_TELEMETRY_MS = 5000;
+constexpr unsigned long MQTT_RETRY_MS = 10000;
+constexpr uint8_t RELAY_COUNT = 3;
+
+WiFiClient mqttNet;
+PubSubClient mqtt(mqttNet);
+String mqttBase;
+String topicTelemetry, topicStatus;
+String topicRelaySet[RELAY_COUNT], topicRelayState[RELAY_COUNT];
+String topicRelayAll;
+bool lastRelayState[RELAY_COUNT];
+bool relayStatePublished = false;
+unsigned long lastMqttTry = 0, lastTelemetry = 0, lastMqttPublish = 0;
+String lastCommand;  // คำสั่งล่าสุดที่รับทาง MQTT (แสดงบน dashboard)
+
+void setupMqttTopics() {
+#ifdef MQTT_BASE_TOPIC
+  mqttBase = MQTT_BASE_TOPIC;
+#else
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  mac.toLowerCase();
+  mqttBase = "hwclass/esp32-" + mac.substring(6);
+#endif
+  topicTelemetry = mqttBase + "/telemetry";
+  topicStatus = mqttBase + "/status";
+  topicRelayAll = mqttBase + "/relay/all/set";
+  for (uint8_t i = 0; i < RELAY_COUNT; i++) {
+    topicRelaySet[i] = mqttBase + "/relay/" + (i + 1) + "/set";
+    topicRelayState[i] = mqttBase + "/relay/" + (i + 1) + "/state";
+  }
+}
+
+void fillMqttStatus(JsonObject m) {
+  m["host"] = MQTT_HOST;
+  m["port"] = MQTT_PORT;
+  m["connected"] = mqtt.connected();
+  m["base"] = mqttBase;
+  m["last_pub"] = lastMqttPublish ? (millis() - lastMqttPublish) / 1000 : -1;
+  m["last_cmd"] = lastCommand;
+  JsonArray topics = m["topics"].to<JsonArray>();
+  auto add = [&](const String& t, const char* dir, const char* desc) {
+    JsonObject o = topics.add<JsonObject>();
+    o["topic"] = t;
+    o["dir"] = dir;
+    o["desc"] = desc;
+  };
+  add(topicTelemetry, "pub", "JSON all data / 5s");
+  add(topicStatus, "pub", "online / offline (retained)");
+  for (uint8_t i = 0; i < RELAY_COUNT; i++) add(topicRelayState[i], "pub", "ON / OFF (retained)");
+  for (uint8_t i = 0; i < RELAY_COUNT; i++) add(topicRelaySet[i], "sub", "on | off | toggle");
+  add(topicRelayAll, "sub", "on | off | toggle (all relays)");
+}
+
+void publishMqtt(const String& topic, const String& payload, bool retain = false) {
+  if (mqtt.publish(topic.c_str(), payload.c_str(), retain)) lastMqttPublish = millis();
+}
+
+void publishTelemetry() {
+  JsonDocument doc;
+  fillStatus(doc, false);
+  String out;
+  serializeJson(doc, out);
+  publishMqtt(topicTelemetry, out);
+}
+
+void publishRelayState(uint8_t i) {
+  publishMqtt(topicRelayState[i], relayById(i + 1)->getState() ? "ON" : "OFF", true);
+}
+
+// return: 1 = on, 0 = off, 2 = toggle, -1 = ไม่รู้จัก
+int parseCommand(String cmd) {
+  cmd.trim();
+  cmd.toLowerCase();
+  if (cmd == "on" || cmd == "1" || cmd == "true") return 1;
+  if (cmd == "off" || cmd == "0" || cmd == "false") return 0;
+  if (cmd == "toggle") return 2;
+  return -1;
+}
+
+void applyCommand(DevRelay* r, int cmd) {
+  if (cmd == 2) r->toggle();
+  else r->setState(cmd == 1);
+}
+
+void onMqttMessage(char* topic, byte* payload, unsigned int len) {
+  String msg;
+  for (unsigned int i = 0; i < len && i < 16; i++) msg += (char)payload[i];
+  int cmd = parseCommand(msg);
+  if (cmd < 0) return;
+  String t(topic);
+  if (t == topicRelayAll) {
+    for (uint8_t i = 1; i <= RELAY_COUNT; i++) applyCommand(relayById(i), cmd);
+  } else {
+    for (uint8_t i = 0; i < RELAY_COUNT; i++) {
+      if (t == topicRelaySet[i]) applyCommand(relayById(i + 1), cmd);
+    }
+  }
+  lastCommand = t.substring(mqttBase.length() + 1) + " = " + msg;
+}
+
+void setupMqtt() {
+  setupMqttTopics();
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt.setBufferSize(1024);
+  mqtt.setSocketTimeout(3);
+  mqtt.setCallback(onMqttMessage);
+}
+
+void connectMqtt() {
+  String clientId = "esp32-" + mqttBase.substring(mqttBase.lastIndexOf('/') + 1) + "-" + String((uint32_t)esp_random() & 0xffff, HEX);
+  bool ok;
+#if defined(MQTT_USER) && defined(MQTT_PASS)
+  ok = mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS, topicStatus.c_str(), 1, true, "offline");
+#else
+  ok = mqtt.connect(clientId.c_str(), topicStatus.c_str(), 1, true, "offline");
+#endif
+  if (!ok) return;
+  mqtt.subscribe(topicRelayAll.c_str());
+  for (uint8_t i = 0; i < RELAY_COUNT; i++) mqtt.subscribe(topicRelaySet[i].c_str());
+  publishMqtt(topicStatus, "online", true);
+  relayStatePublished = false;  // ส่งสถานะ relay ทั้งหมดใหม่
+  lastTelemetry = 0;
+}
+
+void handleMqtt() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!mqtt.connected()) {
+    if (millis() - lastMqttTry >= MQTT_RETRY_MS || lastMqttTry == 0) {
+      lastMqttTry = millis();
+      connectMqtt();
+    }
+    return;
+  }
+  mqtt.loop();
+
+  // relay เปลี่ยนจากทุกทาง (สวิตช์ / เว็บ / MQTT) -> ส่ง state + telemetry ทันที
+  bool changed = false;
+  for (uint8_t i = 0; i < RELAY_COUNT; i++) {
+    bool now = relayById(i + 1)->getState();
+    if (!relayStatePublished || now != lastRelayState[i]) {
+      lastRelayState[i] = now;
+      publishRelayState(i);
+      changed = true;
+    }
+  }
+  relayStatePublished = true;
+
+  if (changed || millis() - lastTelemetry >= MQTT_TELEMETRY_MS) {
+    lastTelemetry = millis();
+    publishTelemetry();
+  }
+}
+
 // กดสวิตช์ 1 ครั้ง = สลับ ON <-> OFF ของ relay ที่คู่กัน
 void onSw2Press() { relay2.toggle(); }
 void onSw3Press() { relay3.toggle(); }
@@ -459,6 +637,7 @@ void setup() {
 
   setupWifi();
   setupWebServer();
+  setupMqtt();
 
   showMessage("Loading weather...");
   fetchWeather();
@@ -504,6 +683,7 @@ void handleSw1() {
 
 void loop() {
   server.handleClient();
+  handleMqtt();
   sw1.update();
   handleSw1();
   sw2.update();

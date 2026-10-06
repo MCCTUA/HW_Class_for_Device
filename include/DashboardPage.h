@@ -38,6 +38,12 @@ h2{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;le
 .relay.on .dot{background:var(--on)}
 button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:8px;padding:6px 16px;cursor:pointer;min-width:84px}
 .relay.on button{background:var(--on);border-color:var(--on);color:#fff}
+.topic{display:flex;gap:8px;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--line)}
+.topic:last-child{border-bottom:0}
+.topic code{font:12px ui-monospace,Menlo,monospace;word-break:break-all;flex:1}
+.topic small{color:var(--muted)}
+.tag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;border:1px solid var(--accent);color:var(--accent);min-width:34px;text-align:center}
+.tag.sub{border-color:#d97706;color:#d97706}
 button:disabled{opacity:.5;cursor:wait}
 </style>
 </head>
@@ -48,6 +54,7 @@ button:disabled{opacity:.5;cursor:wait}
 <section><h2>Temp &amp; Humidity — XY-MD03<span id="xbadge" class="badge"></span></h2><div id="xymd"></div></section>
 <section><h2>Relay</h2><div id="relays"></div></section>
 <section><h2>Weather — <span id="city">-</span></h2><div id="weather"></div></section>
+<section style="grid-column:1/-1"><h2>MQTT<span id="mbadge" class="badge"></span></h2><div id="mqtt"></div></section>
 <section><h2>WiFi</h2><div id="wifi"></div></section>
 </main>
 <script>
@@ -91,6 +98,11 @@ function render(s){
     ['PM2.5',w.pm25.toFixed(1)+' µg/m³'],['AQI',w.aqi+' ('+aqiText[w.aqi]+')'],
     ['Rain chance',w.rain+' %'],['Updated',fmtUp(w.age)+' ago']
   ]):rows([['Status',w.fetched?'Error':'Loading…']]);
+  const m=s.mqtt;
+  $('mbadge').textContent=m.connected?'CONNECTED':'DISCONNECTED';$('mbadge').className='badge'+(m.connected?'':' sim');
+  $('mqtt').innerHTML=rows([['Broker',m.host+':'+m.port],['Base topic',m.base],
+    ['Last publish',m.last_pub<0?'-':m.last_pub+' s ago'],['Last command',m.last_cmd||'-']])+
+    m.topics.map(t=>`<div class="topic"><span class="tag ${t.dir}">${t.dir.toUpperCase()}</span><code>${t.topic}</code><small>${t.desc}</small></div>`).join('');
   const f=s.wifi;
   $('wifi').innerHTML=rows([
     ['SSID',f.ssid],['Signal',f.rssi+' dBm ('+sig(f.rssi)+')'],['IP',f.ip],
